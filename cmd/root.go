@@ -148,10 +148,10 @@ var RootCmd = &cobra.Command{
 
 	RunE: func(cmd *cobra.Command, args []string) error {
 		switch {
+		case viper.IsSet("decompress") && viper.GetBool("decompress"):
+			return decompress(cmd, args)
 		case viper.GetBool("compress"):
 			return compress(cmd, args)
-		case viper.GetBool("decompress"):
-			return decompress(cmd, args)
 		default:
 			return fmt.Errorf("compress or decompress must be specified")
 		}
@@ -412,6 +412,7 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	if len(args) != 1 {
 		return fmt.Errorf("must have only one argument")
 	}
+	const mode = "compress"
 
 	blockSize, err := units.ParseBase2Bytes(viper.GetString("block-size"))
 	switch {
@@ -424,7 +425,7 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	case blockSize > 1*units.GiB:
 		return fmt.Errorf("block-size can't be greater than 1GiB")
 	}
-	log.Debug().Int("block-size-bytes", int(blockSize)).Str("block-size", blockSize.String()).Msg("block-size")
+	log.Debug().Int("block-size-bytes", int(blockSize)).Str("block-size", blockSize.String()).Str("mode", mode).Msg("block-size")
 
 	var bwlimitR units.Base2Bytes
 	{
@@ -434,11 +435,11 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 				return errors.Wrapf(err, "unable to parse %s", "io-limit")
 			}
 
-			log.Debug().Int("io-limit-bytes", int(bwlimitR)).Str("io-limit", bwlimitR.String()).Msg("io-limit")
+			log.Debug().Int("io-limit-bytes", int(bwlimitR)).Str("io-limit", bwlimitR.String()).Str("mode", mode).Msg("io-limit")
 		}
 
 		if bwlimitR == 0 {
-			log.Debug().Msg("io-limit disabled")
+			log.Debug().Str("mode", mode).Msg("io-limit disabled")
 		}
 	}
 
@@ -448,12 +449,12 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	var fr, fw *os.File
 	if args[0] == "-" {
 		if bwlimitR > 0 {
-			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", "stdin").Msg("input")
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", "stdin").Str("mode", mode).Msg("input")
 			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
 			bwr := bwR.Reader(os.Stdin)
 			r = bufio.NewReaderSize(bwr, int(blockSize))
 		} else {
-			log.Debug().Str("file", "stdin").Msg("input")
+			log.Debug().Str("file", "stdin").Str("mode", mode).Msg("input")
 			r = bufio.NewReader(os.Stdin)
 		}
 	} else {
@@ -467,17 +468,17 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 		if bwlimitR > 0 {
 			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
 			r = bufio.NewReaderSize(bwR.Reader(fr), int(blockSize))
-			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", filename).Msg("input")
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", filename).Str("mode", mode).Msg("input")
 		} else {
 			r = bufio.NewReader(fr)
-			log.Debug().Str("file", filename).Msg("input")
+			log.Debug().Str("file", filename).Str("mode", mode).Msg("input")
 		}
 	}
 
 	var w io.Writer
 	var bufioW *bufio.Writer
 	if viper.GetBool("stdout") {
-		log.Debug().Msg("sending output to stdout")
+		log.Debug().Str("mode", mode).Msg("sending output to stdout")
 		bufioW = bufio.NewWriterSize(os.Stdout, int(blockSize))
 		w = bufioW
 	} else {
@@ -486,7 +487,7 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 		}
 
 		filename := viper.GetString("output")
-		log.Debug().Str("filename", filename).Str("block-size", blockSize.String()).Msg("output")
+		log.Debug().Str("filename", filename).Str("block-size", blockSize.String()).Str("mode", mode).Msg("output")
 		if filename == "-" {
 			fw = os.Stdout
 		} else {
@@ -514,12 +515,12 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 			if numThreads < 1 {
 				return fmt.Errorf("num threads can't be negative")
 			}
-			log.Debug().Int("level", compressionLevel).Int("num-threads", numThreads).Str("block-size", blockSize.String()).Msg("compression enabled")
+			log.Debug().Int("level", compressionLevel).Int("num-threads", numThreads).Str("block-size", blockSize.String()).Str("mode", mode).Msg("compression enabled")
 
 			gzW.SetConcurrency(int(blockSize), numThreads)
 		}
 	} else {
-		log.Debug().Msg("compression disabled")
+		log.Debug().Str("mode", mode).Msg("compression disabled")
 	}
 
 	// Rushed implementation of io.Copy() that handles reading from a bwlimit
@@ -565,7 +566,7 @@ READ_LOOP:
 	}
 
 	if fr != nil {
-		log.Debug().Msg("closing input")
+		log.Debug().Str("mode", mode).Msg("closing input")
 		if err := fr.Close(); err != nil {
 			return errors.Wrap(err, "unable to close input")
 		}
@@ -575,26 +576,26 @@ READ_LOOP:
 	// perform error handling.
 
 	if gzW != nil {
-		log.Debug().Msg("flushing output compression stream")
+		log.Debug().Str("mode", mode).Msg("flushing output compression stream")
 		if err := gzW.Flush(); err != nil {
 			return errors.Wrap(err, "error flushing gzip writer")
 		}
 
-		log.Debug().Msg("closing output compression stream")
+		log.Debug().Str("mode", mode).Msg("closing output compression stream")
 		if err := gzW.Close(); err != nil {
 			return errors.Wrap(err, "error closing gzip writer")
 		}
 	}
 
 	if bufioW != nil {
-		log.Debug().Msg("flushing output buffers")
+		log.Debug().Str("mode", mode).Msg("flushing output buffers")
 		if err := bufioW.Flush(); err != nil {
 			return errors.Wrap(err, "unable to flush output")
 		}
 	}
 
 	if fw != nil {
-		log.Debug().Msg("closing output file")
+		log.Debug().Str("mode", mode).Msg("closing output file")
 		if err := fw.Close(); err != nil {
 			return errors.Wrap(err, "unable to close output")
 		}
@@ -603,8 +604,192 @@ READ_LOOP:
 	return nil
 }
 
-func decompress(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("decompress not implemented")
+// decompress reads from a source (or stdin) and decompresses.
+//
+// TODO(seanc@): Decompose this function into something halfway sane.
+// Shell-script in Go much?  This is a sadness and needs to be cleaned up.
+func decompress(cmd *cobra.Command, args []string) (err error) {
+	if len(args) != 1 {
+		return fmt.Errorf("must have only one argument")
+	}
+	const mode = "decompress"
+
+	blockSize, err := units.ParseBase2Bytes(viper.GetString("block-size"))
+	switch {
+	case err != nil:
+		return errors.Wrapf(err, "unable to parse %s", "block-size")
+	case blockSize == 0:
+		blockSize = 1 * units.MiB
+	case blockSize < 0:
+		return fmt.Errorf("block-size can't be negative")
+	case blockSize > 1*units.GiB:
+		return fmt.Errorf("block-size can't be greater than 1GiB")
+	}
+	log.Debug().Int("block-size-bytes", int(blockSize)).Str("block-size", blockSize.String()).Str("mode", mode).Msg("block-size")
+
+	var bwlimitR units.Base2Bytes
+	{
+		if viper.IsSet("io-limit") {
+			bwlimitR, err = units.ParseBase2Bytes(viper.GetString("io-limit"))
+			if err != nil {
+				return errors.Wrapf(err, "unable to parse %s", "io-limit")
+			}
+
+			log.Debug().Int("io-limit-bytes", int(bwlimitR)).Str("io-limit", bwlimitR.String()).Str("mode", mode).Msg("io-limit")
+		}
+
+		if bwlimitR == 0 {
+			log.Debug().Str("mode", mode).Msg("io-limit disabled")
+		}
+	}
+
+	blockingReaders := true
+
+	var gzr *gzip.Reader
+	var r io.Reader
+	var fr, fw *os.File
+	if args[0] == "-" {
+		if bwlimitR > 0 {
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", "stdin").Str("mode", mode).Msg("input")
+			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
+			bwr := bwR.Reader(os.Stdin)
+			gzr, err = gzip.NewReader(bufio.NewReaderSize(bwr, int(blockSize)))
+			if err != nil {
+				return errors.Wrap(err, "unable to decompress")
+			}
+		} else {
+			log.Debug().Str("file", "stdin").Str("mode", mode).Msg("input")
+			gzr, err = gzip.NewReader(bufio.NewReader(os.Stdin))
+			if err != nil {
+				return errors.Wrap(err, "unable to decompress")
+			}
+		}
+		r = gzr
+	} else {
+		var err error
+		filename := args[0]
+		fr, err = os.Open(filename)
+		if err != nil {
+			return errors.Wrapf(err, "unable to open %+q", filename)
+		}
+
+		if bwlimitR > 0 {
+			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
+			gzr, err = gzip.NewReader(bufio.NewReaderSize(bwR.Reader(fr), int(blockSize)))
+			if err != nil {
+				return errors.Wrap(err, "unable to decompress")
+			}
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", filename).Str("mode", mode).Msg("input")
+		} else {
+			gzr, err = gzip.NewReader(bufio.NewReader(fr))
+			if err != nil {
+				return errors.Wrap(err, "unable to decompress")
+			}
+			log.Debug().Str("file", filename).Str("mode", mode).Msg("input")
+		}
+		r = gzr
+	}
+
+	var w io.Writer
+	var bufioW *bufio.Writer
+	if viper.GetBool("stdout") {
+		log.Debug().Str("mode", mode).Msg("sending output to stdout")
+		bufioW = bufio.NewWriterSize(os.Stdout, int(blockSize))
+		w = bufioW
+	} else {
+		if !viper.IsSet("output") || viper.GetString("output") == "" {
+			return fmt.Errorf("no output file set")
+		}
+
+		filename := viper.GetString("output")
+		log.Debug().Str("filename", filename).Str("block-size", blockSize.String()).Str("mode", mode).Msg("output")
+		if filename == "-" {
+			fw = os.Stdout
+		} else {
+			fw, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+			if err != nil {
+				return errors.Wrapf(err, "unable to open %+q", filename)
+			}
+		}
+
+		bufioW = bufio.NewWriterSize(fw, int(blockSize))
+		w = bufioW
+	}
+
+	// Rushed implementation of io.Copy() that handles reading from a bwlimit
+	// reader that may return 0 bytes if the bandwidth threshold has been
+	// exceeded.
+	buf := make([]byte, int(4*units.MiB))
+READ_LOOP:
+	for {
+		nr, err := r.Read(buf)
+		if err == io.EOF {
+			break
+		}
+
+		if nr == 0 {
+			// FIXME(seanc@): this sleep constant should be exposed by the upstream
+			// library and reused here.
+			time.Sleep(10 * time.Millisecond)
+			continue READ_LOOP
+		}
+
+		// Iterate attempting to write
+		off := 0
+	WRITE_LOOP:
+		for {
+			nw, err := w.Write(buf[off:nr])
+			if err != nil {
+				return errors.Wrap(err, "unable to write buffer")
+			}
+
+			// Short-write, try again
+			if nw == 0 {
+				// FIXME(seanc@): this sleep constant should be exposed by the upstream
+				// library and reused here.
+				time.Sleep(10 * time.Millisecond)
+				continue WRITE_LOOP
+			}
+
+			off += nw
+			if off == nr {
+				break WRITE_LOOP
+			}
+		}
+	}
+
+	if fr != nil {
+		log.Debug().Str("mode", mode).Msg("closing input")
+		if err := fr.Close(); err != nil {
+			return errors.Wrap(err, "unable to close input")
+		}
+	}
+
+	// Close writers in reverse order.  None of these can be deferred in order to
+	// perform error handling.
+
+	if gzr != nil {
+		log.Debug().Str("mode", mode).Msg("flushing output buffers")
+		if err := gzr.Close(); err != nil {
+			return errors.Wrap(err, "unable to close the decompression decoder")
+		}
+	}
+
+	if bufioW != nil {
+		log.Debug().Str("mode", mode).Msg("flushing output buffers")
+		if err := bufioW.Flush(); err != nil {
+			return errors.Wrap(err, "unable to flush output")
+		}
+	}
+
+	if fw != nil {
+		log.Debug().Str("mode", mode).Msg("closing output file")
+		if err := fw.Close(); err != nil {
+			return errors.Wrap(err, "unable to close output")
+		}
+	}
+
+	return nil
 }
 
 // Return the first user selected compression level.  If the user selected
