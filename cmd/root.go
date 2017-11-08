@@ -346,6 +346,26 @@ func init() {
 		viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
 		viper.SetDefault(longName, defaultValue)
 	}
+
+	{
+		for i := 1; i <= 9; i++ {
+			var (
+				// FIXME(seanc@): "compress-%d" should be a constant
+				longName     = fmt.Sprintf("compress-%d", i)
+				shortName    = fmt.Sprintf("%d", i)
+				defaultValue = false
+				description  = "Compress the input using the specified compression level"
+			)
+
+			if i == gzip.DefaultCompression {
+				defaultValue = true
+			}
+
+			RootCmd.PersistentFlags().BoolP(longName, shortName, defaultValue, description)
+			viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
+			viper.SetDefault(longName, defaultValue)
+		}
+	}
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -412,12 +432,13 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	// var bufioR *bufio.Reader
 	if viper.GetBool("stdout") {
 		if bwlimitW > 0 {
-			bufioW = bufio.NewWriter(os.Stdout)
 			bwW := bwlimit.NewBwlimit(bwlimitW, blockingWriters)
+			bufioW = bufio.NewWriter(os.Stdout)
 			bww = bwW.Writer(bufioW)
 			w = bww
 		} else {
-			w = bufio.NewWriter(os.Stdout)
+			bufioW = bufio.NewWriter(os.Stdout)
+			w = bufioW
 		}
 	} else {
 		if !viper.IsSet("output") || viper.GetString("output") == "" {
@@ -440,11 +461,15 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 			bww = bwW.Writer(bufioW)
 			w = bww
 		} else {
-			w = bufio.NewWriter(fw)
+			bufioW = bufio.NewWriter(fw)
+			w = bufioW
 		}
 	}
 
-	gzW := gzip.NewWriter(w)
+	gzW, err := gzip.NewWriterLevel(w, getCompressionLevel(cmd))
+	if err != nil {
+		return errors.Wrap(err, "multiple compression levels specified")
+	}
 	gzW.SetConcurrency(100000, 10)
 
 	// Rushed implementation of io.Copy() that handles reading/writing from a
@@ -523,8 +548,14 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	// perform error handling.
 
 	{
-		if err := gzW.Flush(); err != nil {
-			return errors.Wrap(err, "error flushing gzip writer")
+		for {
+			if err := gzW.Flush(); err != nil {
+				if strings.HasPrefix(err.Error(), "gzip: short write ") {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				return errors.Wrap(err, "error flushing gzip writer")
+			}
 		}
 
 		if err := gzW.Close(); err != nil {
@@ -532,15 +563,15 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	if bufioW != nil {
-		if err := bufioW.Flush(); err != nil {
-			return errors.Wrap(err, "unable to flush output")
-		}
-	}
-
 	if bww != nil {
 		if err := bww.Close(); err != nil {
 			return errors.Wrap(err, "error closing throttling writer")
+		}
+	}
+
+	if bufioW != nil {
+		if err := bufioW.Flush(); err != nil {
+			return errors.Wrap(err, "unable to flush output")
 		}
 	}
 
@@ -555,4 +586,29 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 
 func decompress(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("decompress not implemented")
+}
+
+// Return the first user selected compression level.  If the user selected
+// multiple conflicting values, the value -1 will be returned.  If the user did
+// not select any values, the default compression level (6) will be returned.
+func getCompressionLevel(cmd *cobra.Command) int {
+	var lastValue int
+	for i := 9; i > 0; i-- {
+		// FIXME(seanc@): "compress-%d" should be a constant
+		longName := fmt.Sprintf("compress-%d", i)
+		if viper.IsSet(longName) && viper.GetBool(longName) {
+			if lastValue != 0 {
+				lastValue = -1
+				break
+			}
+
+			lastValue = i
+		}
+	}
+
+	if lastValue == 0 {
+		return gzip.DefaultCompression
+	}
+
+	return lastValue
 }
