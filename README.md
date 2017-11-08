@@ -104,10 +104,13 @@ CPU utilization (percentage)            : 101.6%
 Times the process was swapped           : 0
 Times of major page faults              : 0
 Times of minor page faults              : 957
-% find /usr/local/bin -type f -print0 | xargs -0 cat | pigz -9 -c - > gzip.gz
+% find /usr/local/bin -type f -print0 | xargs -0 cat | gzip -9 -c - > gzip.gz
 % du -a gzip.gz
 200209	gzip.gz
 % gzcat gzip.gz | md5 
+3d382c184569f3ed0a1dea9f402907ad
+% cat ./gzip.gz | /usr/bin/time gzcat -d - | md5
+        2.92 real         1.79 user         0.16 sys
 3d382c184569f3ed0a1dea9f402907ad
 ```
 
@@ -135,6 +138,9 @@ Times of minor page faults              : 2119
 200105	pigz.gz
 % gzcat pigz.gz | md5 
 3d382c184569f3ed0a1dea9f402907ad
+% cat ./pigz.gz | /usr/bin/time pigz -d - | md5
+        2.13 real         2.42 user         0.28 sys
+3d382c184569f3ed0a1dea9f402907ad
 ```
 
 ### `smallz` Test
@@ -160,6 +166,9 @@ Times of minor page faults              : 9377
 % du -a smallz.gz
 205897	smallz.gz
 % gzcat smallz.gz |md5
+3d382c184569f3ed0a1dea9f402907ad
+% cat ./smallz.gz | /usr/bin/time pigz -d - | md5
+        1.69 real         1.90 user         0.26 sys
 3d382c184569f3ed0a1dea9f402907ad
 % du -a /etc/services 
 81	/etc/services
