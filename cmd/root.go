@@ -21,6 +21,7 @@ import (
 	stdlog "log"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,21 +45,24 @@ var RootCmd = &cobra.Command{
 	Short:        buildtime.PROGNAME + ` CLI`,
 	SilenceUsage: true,
 	Args:         cobra.ExactArgs(1),
-	Long:         buildtime.PROGNAME + ` is an optionally throttled compression utility`,
+	Long:         buildtime.PROGNAME + ` is an parallel compression utility with throttling`,
 	Example: `  $ echo 'Hello World' | smallz -c -9 - > stdout.gz
+  $ smallz -dc stdout.gz
+  Hello World
+  $ echo 'Hello World' | time smallz -i=1B -c -0 -
   $ smallz -dc stdout.gz
   Hello World`,
 
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Re-initialize logging with user-supplied configuration parameters
 		{
-			// os.Stdout isn't guaranteed to be thread-safe, wrap in a sync writer.
+			// os.Stderr isn't guaranteed to be thread-safe, wrap in a sync writer.
 			// Files are guaranteed to be safe, terminals are not.
 			var logWriter io.Writer
-			if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
-				logWriter = zerolog.SyncWriter(os.Stdout)
+			if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+				logWriter = zerolog.SyncWriter(os.Stderr)
 			} else {
-				logWriter = os.Stdout
+				logWriter = os.Stderr
 			}
 
 			logFmt, err := config.LogLevelParse(viper.GetString(config.KeyAgentLogFormat))
@@ -67,7 +71,7 @@ var RootCmd = &cobra.Command{
 			}
 
 			if logFmt == config.LogFormatAuto {
-				if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+				if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
 					logFmt = config.LogFormatHuman
 				} else {
 					logFmt = config.LogFormatZerolog
@@ -187,7 +191,7 @@ func init() {
 			longName     = "log-level"
 			shortName    = "l"
 			defaultValue = "INFO"
-			description  = "Log level"
+			description  = "Change the log level being sent to stderr"
 		)
 
 		RootCmd.PersistentFlags().StringP(longName, shortName, defaultValue, description)
@@ -218,7 +222,7 @@ func init() {
 		)
 
 		defaultValue := false
-		if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+		if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
 			defaultValue = true
 		}
 
@@ -310,23 +314,10 @@ func init() {
 
 	{
 		const (
-			longName     = "read-bwlimit"
-			shortName    = "R"
+			longName     = "io-limit"
+			shortName    = "i"
 			defaultValue = "0B"
-			description  = "Specify the bandwidth limit for inputs in bytes per sceond, 0B to disable"
-		)
-
-		RootCmd.PersistentFlags().StringP(longName, shortName, defaultValue, description)
-		viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
-		viper.SetDefault(longName, defaultValue)
-	}
-
-	{
-		const (
-			longName     = "write-bwlimit"
-			shortName    = "W"
-			defaultValue = "0B"
-			description  = "Specify the bandwidth limit for outputs in bytes per sceond, 0B to disable"
+			description  = "Specify the rate at which IO should be ingested, 0B to disable"
 		)
 
 		RootCmd.PersistentFlags().StringP(longName, shortName, defaultValue, description)
@@ -348,6 +339,46 @@ func init() {
 	}
 
 	{
+		const (
+			longName    = "num-threads"
+			shortName   = "t"
+			description = "Specify the output file to use"
+		)
+		defaultValue := int(runtime.NumCPU())
+
+		RootCmd.PersistentFlags().IntP(longName, shortName, defaultValue, description)
+		viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
+		viper.SetDefault(longName, defaultValue)
+	}
+
+	{
+		const (
+			longName     = "block-size"
+			shortName    = "b"
+			defaultValue = "1MiB"
+			description  = "Specify the block-size to use"
+		)
+
+		RootCmd.PersistentFlags().StringP(longName, shortName, defaultValue, description)
+		viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
+		viper.SetDefault(longName, defaultValue)
+	}
+
+	{
+		{
+			var (
+				// FIXME(seanc@): "compress-%d" should be a constant
+				longName     = "compress-0"
+				shortName    = "0"
+				defaultValue = false
+				description  = "Skip compressing the input"
+			)
+
+			RootCmd.PersistentFlags().BoolP(longName, shortName, defaultValue, description)
+			viper.BindPFlag(longName, RootCmd.PersistentFlags().Lookup(longName))
+			viper.SetDefault(longName, defaultValue)
+		}
+
 		for i := 1; i <= 9; i++ {
 			var (
 				// FIXME(seanc@): "compress-%d" should be a constant
@@ -374,78 +405,88 @@ func initConfig() {
 }
 
 // compress reads from a source (or stdin) and compresses.
+//
+// TODO(seanc@): Decompose this function into something halfway sane.
+// Shell-script in Go much?  This is a sadness and needs to be cleaned up.
 func compress(cmd *cobra.Command, args []string) (err error) {
 	if len(args) != 1 {
 		return fmt.Errorf("must have only one argument")
 	}
 
-	var bwlimitR, bwlimitW int
-	if viper.IsSet("read-bwlimit") {
-		bwlimitRB, err := units.ParseBase2Bytes(viper.GetString("read-bwlimit"))
-		if err != nil {
-			return errors.Wrapf(err, "unable to parse %s", "read-bwlimit")
-		}
-
-		bwlimitR = int(bwlimitRB)
+	blockSize, err := units.ParseBase2Bytes(viper.GetString("block-size"))
+	switch {
+	case err != nil:
+		return errors.Wrapf(err, "unable to parse %s", "block-size")
+	case blockSize == 0:
+		blockSize = 1 * units.MiB
+	case blockSize < 0:
+		return fmt.Errorf("block-size can't be negative")
+	case blockSize > 1*units.GiB:
+		return fmt.Errorf("block-size can't be greater than 1GiB")
 	}
+	log.Debug().Int("block-size-bytes", int(blockSize)).Str("block-size", blockSize.String()).Msg("block-size")
 
-	if viper.IsSet("write-bwlimit") {
-		bwlimitWB, err := units.ParseBase2Bytes(viper.GetString("write-bwlimit"))
-		if err != nil {
-			return errors.Wrapf(err, "unable to parse %s", "write-bwlimit")
+	var bwlimitR units.Base2Bytes
+	{
+		if viper.IsSet("io-limit") {
+			bwlimitR, err = units.ParseBase2Bytes(viper.GetString("io-limit"))
+			if err != nil {
+				return errors.Wrapf(err, "unable to parse %s", "io-limit")
+			}
+
+			log.Debug().Int("io-limit-bytes", int(bwlimitR)).Str("io-limit", bwlimitR.String()).Msg("io-limit")
 		}
 
-		bwlimitW = int(bwlimitWB)
+		if bwlimitR == 0 {
+			log.Debug().Msg("io-limit disabled")
+		}
 	}
 
 	blockingReaders := true
-	blockingWriters := true
 
-	var bww *bwlimit.Writer
 	var r *bufio.Reader
 	var fr, fw *os.File
 	if args[0] == "-" {
 		if bwlimitR > 0 {
-			bwR := bwlimit.NewBwlimit(bwlimitR, blockingReaders)
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", "stdin").Msg("input")
+			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
 			bwr := bwR.Reader(os.Stdin)
-			r = bufio.NewReader(bwr)
+			r = bufio.NewReaderSize(bwr, int(blockSize))
 		} else {
+			log.Debug().Str("file", "stdin").Msg("input")
 			r = bufio.NewReader(os.Stdin)
 		}
 	} else {
 		var err error
-		fr, err = os.Open(args[0])
+		filename := args[0]
+		fr, err = os.Open(filename)
 		if err != nil {
-			return errors.Wrapf(err, "unable to open %+q", args[0])
+			return errors.Wrapf(err, "unable to open %+q", filename)
 		}
 
 		if bwlimitR > 0 {
-			bwR := bwlimit.NewBwlimit(bwlimitR, blockingReaders)
-			r = bufio.NewReader(bwR.Reader(fr))
+			bwR := bwlimit.NewBwlimit(int(bwlimitR), blockingReaders)
+			r = bufio.NewReaderSize(bwR.Reader(fr), int(blockSize))
+			log.Debug().Str("io-limit", bwlimitR.String()).Str("block-size", blockSize.String()).Str("file", filename).Msg("input")
 		} else {
 			r = bufio.NewReader(fr)
+			log.Debug().Str("file", filename).Msg("input")
 		}
 	}
 
 	var w io.Writer
 	var bufioW *bufio.Writer
-	// var bufioR *bufio.Reader
 	if viper.GetBool("stdout") {
-		if bwlimitW > 0 {
-			bwW := bwlimit.NewBwlimit(bwlimitW, blockingWriters)
-			bufioW = bufio.NewWriter(os.Stdout)
-			bww = bwW.Writer(bufioW)
-			w = bww
-		} else {
-			bufioW = bufio.NewWriter(os.Stdout)
-			w = bufioW
-		}
+		log.Debug().Msg("sending output to stdout")
+		bufioW = bufio.NewWriterSize(os.Stdout, int(blockSize))
+		w = bufioW
 	} else {
 		if !viper.IsSet("output") || viper.GetString("output") == "" {
 			return fmt.Errorf("no output file set")
 		}
 
 		filename := viper.GetString("output")
+		log.Debug().Str("filename", filename).Str("block-size", blockSize.String()).Msg("output")
 		if filename == "-" {
 			fw = os.Stdout
 		} else {
@@ -455,90 +496,76 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 			}
 		}
 
-		if bwlimitW > 0 {
-			bwW := bwlimit.NewBwlimit(bwlimitW, blockingWriters)
-			bufioW = bufio.NewWriter(fw)
-			bww = bwW.Writer(bufioW)
-			w = bww
-		} else {
-			bufioW = bufio.NewWriter(fw)
-			w = bufioW
-		}
+		bufioW = bufio.NewWriterSize(fw, int(blockSize))
+		w = bufioW
 	}
 
-	gzW, err := gzip.NewWriterLevel(w, getCompressionLevel(cmd))
-	if err != nil {
-		return errors.Wrap(err, "multiple compression levels specified")
-	}
-	gzW.SetConcurrency(100000, 10)
-
-	// Rushed implementation of io.Copy() that handles reading/writing from a
-	// buffer because the writer can perform a short-write and return 0, nil if
-	// we've exceeded the write Bandwidth.
-	//
-	// TODO(seanc@): I wish it would just block for real.  It looks like blocking
-	// writers aren't behaving as expected atm.  In the interim, this'll work.
-	//
-	// 	if _, err := io.Copy(gzW, r); err != nil {
-	// 	return errors.Wrap(err, "unable to write")
-	// }
-
-	// buf := make([]byte, int(1*units.MiB))
-	for {
-		nw, err := r.WriteTo(gzW)
-		fmt.Fprintf(os.Stderr, "wrote %d bytes\n", nw)
+	compressionLevel := getCompressionLevel(cmd)
+	var gzW *gzip.Writer
+	if compressionLevel != 0 {
+		gzW, err = gzip.NewWriterLevel(w, compressionLevel)
 		if err != nil {
-			if err == io.EOF {
-				break
+			return errors.Wrap(err, "multiple compression levels specified")
+		}
+		w = gzW
+
+		{
+			numThreads := viper.GetInt("num-threads")
+			if numThreads < 1 {
+				return fmt.Errorf("num threads can't be negative")
+			}
+			log.Debug().Int("level", compressionLevel).Int("num-threads", numThreads).Str("block-size", blockSize.String()).Msg("compression enabled")
+
+			gzW.SetConcurrency(int(blockSize), numThreads)
+		}
+	} else {
+		log.Debug().Msg("compression disabled")
+	}
+
+	// Rushed implementation of io.Copy() that handles reading from a bwlimit
+	// reader that may return 0 bytes if the bandwidth threshold has been
+	// exceeded.
+	buf := make([]byte, int(4*units.MiB))
+READ_LOOP:
+	for {
+		nr, err := r.Read(buf)
+		if err == io.EOF {
+			break
+		}
+
+		if nr == 0 {
+			// FIXME(seanc@): this sleep constant should be exposed by the upstream
+			// library and reused here.
+			time.Sleep(10 * time.Millisecond)
+			continue READ_LOOP
+		}
+
+		// Iterate attempting to write
+		off := 0
+	WRITE_LOOP:
+		for {
+			nw, err := w.Write(buf[off:nr])
+			if err != nil {
+				return errors.Wrap(err, "unable to write buffer")
 			}
 
-			return errors.Wrap(err, "unable to write buffer")
-		}
+			// Short-write, try again
+			if nw == 0 {
+				// FIXME(seanc@): this sleep constant should be exposed by the upstream
+				// library and reused here.
+				time.Sleep(10 * time.Millisecond)
+				continue WRITE_LOOP
+			}
 
-		if nw == 0 {
-			break
-			// This should be a user configurable sleep timer.
-			time.Sleep(10 * time.Millisecond)
-			continue
+			off += nw
+			if off == nr {
+				break WRITE_LOOP
+			}
 		}
 	}
 
-	// 	nr, err := r.Read(buf)
-	// 	fmt.Fprintf(os.Stderr, "read %d bytes\n", nr)
-	// 	if err == io.EOF {
-	// 		break
-	// 	}
-
-	// 	// Iterate attempting to write
-	// 	off := 0
-	// 	for {
-	// 		nw, err := gzW.Write(buf[off:nr])
-	// 		fmt.Fprintf(os.Stderr, "wrote %d bytes\n", nw)
-	// 		if err != nil {
-	// 			return errors.Wrap(err, "unable to write buffer")
-	// 		}
-
-	// 		// Short-write, wrap to continue
-	// 		if nw == 0 {
-	// 			time.Sleep(100 * time.Millisecond)
-	// 			continue
-	// 		}
-
-	// 		off += nw
-	// 		if off >= nr {
-	// 			break
-	// 		}
-
-	// 	}
-	// }
-
-	// if bufioR != nil {
-	// 	if err := bufioR.Flush(); err != nil {
-	// 		return errors.Wrap(err, "unable to flush buffered input")
-	// 	}
-	// }
-
 	if fr != nil {
+		log.Debug().Msg("closing input")
 		if err := fr.Close(); err != nil {
 			return errors.Wrap(err, "unable to close input")
 		}
@@ -547,35 +574,27 @@ func compress(cmd *cobra.Command, args []string) (err error) {
 	// Close writers in reverse order.  None of these can be deferred in order to
 	// perform error handling.
 
-	{
-		for {
-			if err := gzW.Flush(); err != nil {
-				if strings.HasPrefix(err.Error(), "gzip: short write ") {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-				return errors.Wrap(err, "error flushing gzip writer")
-			}
+	if gzW != nil {
+		log.Debug().Msg("flushing output compression stream")
+		if err := gzW.Flush(); err != nil {
+			return errors.Wrap(err, "error flushing gzip writer")
 		}
 
+		log.Debug().Msg("closing output compression stream")
 		if err := gzW.Close(); err != nil {
 			return errors.Wrap(err, "error closing gzip writer")
 		}
 	}
 
-	if bww != nil {
-		if err := bww.Close(); err != nil {
-			return errors.Wrap(err, "error closing throttling writer")
-		}
-	}
-
 	if bufioW != nil {
+		log.Debug().Msg("flushing output buffers")
 		if err := bufioW.Flush(); err != nil {
 			return errors.Wrap(err, "unable to flush output")
 		}
 	}
 
 	if fw != nil {
+		log.Debug().Msg("closing output file")
 		if err := fw.Close(); err != nil {
 			return errors.Wrap(err, "unable to close output")
 		}
@@ -590,14 +609,18 @@ func decompress(cmd *cobra.Command, args []string) error {
 
 // Return the first user selected compression level.  If the user selected
 // multiple conflicting values, the value -1 will be returned.  If the user did
-// not select any values, the default compression level (6) will be returned.
+// not select any values, the default compression level (6) will be returned.  A
+// value of 0 will pass the data through uncompressed (i.e. emulate pv(1)'s
+// functionality).
 func getCompressionLevel(cmd *cobra.Command) int {
-	var lastValue int
-	for i := 9; i > 0; i-- {
+	const initialValue = -2
+
+	var lastValue int = initialValue
+	for i := 9; i >= 0; i-- {
 		// FIXME(seanc@): "compress-%d" should be a constant
 		longName := fmt.Sprintf("compress-%d", i)
 		if viper.IsSet(longName) && viper.GetBool(longName) {
-			if lastValue != 0 {
+			if lastValue != initialValue {
 				lastValue = -1
 				break
 			}
@@ -606,7 +629,7 @@ func getCompressionLevel(cmd *cobra.Command) int {
 		}
 	}
 
-	if lastValue == 0 {
+	if lastValue == initialValue {
 		return gzip.DefaultCompression
 	}
 
