@@ -9,11 +9,17 @@ administrators who need to not be CPU bound, but also need to be mindful of
 either disk IO or network bandwidth.  Additionally, there is an uncompressed
 mode so you can pass uncompressed data to the IO throttle.
 
+See @klauspost's excellent
+writeup,
+[Re-balancing Deflate Compression Levels](https://blog.klauspost.com/rebalancing-deflate-compression-levels/),
+for additional considerations regarding the use of `gzip`.
+
 As ~90min airplane-ware goes, this should be a useful utility.  Please test.
 There are a number of rough edges in terms of usability that could be improved.
-See TODOs or FIXME notes for items to clean up.  "Patches welcome!"  Because
-`smallz` is written in Go, it should be easy to install and deploy without
-needing to install multiple programs or libraries.
+See TODOs or FIXME notes for items to clean up (these need to be moved to Github
+issues).  "Patches welcome!"  `smallz` is written in Go and inherently easy to
+deploy as a "Go-gettable" standalone program (i.e. no dependencies on
+`libz(3)`).
 
 ## Installation
 
