@@ -165,6 +165,8 @@ func Execute() {
 }
 
 func init() {
+	cobra.OnInitialize(initConfig)
+
 	// os.Stderr isn't guaranteed to be thread-safe, wrap in a sync writer.  Files
 	// are guaranteed to be safe, terminals are not.
 	w := zerolog.ConsoleWriter{
@@ -172,8 +174,6 @@ func init() {
 		NoColor: true,
 	}
 	zlog := zerolog.New(zerolog.SyncWriter(w)).With().Timestamp().Logger()
-
-	cobra.OnInitialize(initConfig)
 
 	zerolog.DurationFieldUnit = time.Microsecond
 	zerolog.DurationFieldInteger = true

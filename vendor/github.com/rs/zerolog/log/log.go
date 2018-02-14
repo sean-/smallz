@@ -22,7 +22,7 @@ func With() zerolog.Context {
 	return Logger.With()
 }
 
-// Level crestes a child logger with the minium accepted level set to level.
+// Level creates a child logger with the minimum accepted level set to level.
 func Level(level zerolog.Level) zerolog.Logger {
 	return Logger.Level(level)
 }
@@ -30,6 +30,11 @@ func Level(level zerolog.Level) zerolog.Logger {
 // Sample returns a logger with the s sampler.
 func Sample(s zerolog.Sampler) zerolog.Logger {
 	return Logger.Sample(s)
+}
+
+// Hook returns a logger with the h Hook.
+func Hook(h zerolog.Hook) zerolog.Logger {
+	return Logger.Hook(h)
 }
 
 // Debug starts a new message with debug level.
@@ -76,8 +81,15 @@ func Panic() *zerolog.Event {
 	return Logger.Panic()
 }
 
+// WithLevel starts a new message with level.
+//
+// You must call Msg on the returned event in order to send the event.
+func WithLevel(level zerolog.Level) *zerolog.Event {
+	return Logger.WithLevel(level)
+}
+
 // Log starts a new message with no level. Setting zerolog.GlobalLevel to
-// zerlog.Disabled will still disable events produced by this method.
+// zerolog.Disabled will still disable events produced by this method.
 //
 // You must call Msg on the returned event in order to send the event.
 func Log() *zerolog.Event {
